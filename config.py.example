@@ -1,0 +1,21 @@
+"""
+Configuration settings for SEMS Data Collector
+Copy this file to config.py and fill in your credentials.
+"""
+
+# SEMS Portal Credentials (semsportal.com)
+# Your login email/username and password
+SEMS_ACCOUNT = "your@email.com"
+SEMS_PASSWORD = "your_password"
+
+# REQUIRED: Your Power Station ID (UUID format, NOT the inverter serial number)
+#
+# Find the Station ID by:
+#   1. Log in to https://www.semsportal.com in your web browser
+#   2. Click on your power station to view its details
+#   3. Look at the URL in your browser's address bar
+#   4. The URL will look like: https://www.semsportal.com/powerstation/powerstatussnmin/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+#   5. Copy the UUID part (the xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx portion)
+#
+# Example: SEMS_STATION_ID = "a1b2c3d4-e5f6-7890-abcd-1234567890ef"
+SEMS_STATION_ID = ""
