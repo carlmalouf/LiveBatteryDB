@@ -7,13 +7,43 @@ from datetime import datetime, date
 import time
 import os
 
-# Import our existing client and config
+# Import our existing client
 from sems_client import SEMSClient
-import config
+
+# Try to import config for local development, but don't fail if it's missing (e.g. on server)
+try:
+    import config
+except ImportError:
+    config = None
 
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
+
+def get_setting(key, default=None):
+    """
+    Retrieve a configuration setting with the following priority:
+    1. Streamlit Secrets (st.secrets) - for deployment
+    2. Environment Variables - for Docker/System setup
+    3. config.py - for local development
+    4. Default value
+    """
+    # 1. Streamlit Secrets
+    try:
+        if hasattr(st, "secrets") and key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass # Ignore errors accessing secrets if not configured
+        
+    # 2. Environment Variables
+    if key in os.environ:
+        return os.environ[key]
+        
+    # 3. Local Config module
+    if config and hasattr(config, key):
+        return getattr(config, key)
+        
+    return default
 
 # Page Config
 st.set_page_config(
@@ -35,9 +65,17 @@ FEEDIN_TARIFF = 5.0   # Credit for selling to grid
 def get_sems_data():
     """Fetch today's chart data and realtime status from SEMS."""
     async def fetch():
+        # Retrieve credentials from secrets/env/config
+        sems_account = get_setting("SEMS_ACCOUNT")
+        sems_password = get_setting("SEMS_PASSWORD")
+        station_id = get_setting("SEMS_STATION_ID")
+
+        if not sems_account or not sems_password or not station_id:
+            st.error("Missing Configuration: Please set SEMS_ACCOUNT, SEMS_PASSWORD, and SEMS_STATION_ID in .streamlit/secrets.toml or config.py")
+            return None, None
+
         # Create client using config (now supports env vars)
-        client = SEMSClient(config.SEMS_ACCOUNT, config.SEMS_PASSWORD)
-        station_id = config.SEMS_STATION_ID
+        client = SEMSClient(sems_account, sems_password)
         today = date.today().strftime("%Y-%m-%d")
         
         # Fetch live instantaneous data and today's chart history
