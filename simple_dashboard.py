@@ -173,7 +173,7 @@ def process_chart_data(chart_json):
 # -----------------------------------------------------------------------------
 
 # Title with Date
-st.title(f"🌞 Live Energy Dashboard - {date.today().strftime('%A %d %B')}")
+st.title(f"🌞 Live Energy Dashboard - {datetime.now(ZoneInfo('Australia/Brisbane')).strftime('%A %d %B')}")
 
 # Fetch Data
 realtime, chart_json = get_sems_data()
