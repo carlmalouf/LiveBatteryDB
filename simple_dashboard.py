@@ -6,6 +6,11 @@ import asyncio
 from datetime import datetime, date
 import time
 import os
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    # Backwards compatibility for Python < 3.9
+    from backports.zoneinfo import ZoneInfo
 
 # Import our existing client
 from sems_client import SEMSClient
@@ -76,7 +81,9 @@ def get_sems_data():
 
         # Create client using config (now supports env vars)
         client = SEMSClient(sems_account, sems_password)
-        today = date.today().strftime("%Y-%m-%d")
+        
+        # Use Brisbane time for "today"
+        today = datetime.now(ZoneInfo("Australia/Brisbane")).strftime("%Y-%m-%d")
         
         # Fetch live instantaneous data and today's chart history
         realtime_data = await client.fetch_data(station_id)
@@ -381,7 +388,7 @@ if df is not None and not df.empty:
     
     st.plotly_chart(fig, use_container_width=True)
     
-    st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}. Data refreshes automatically every minute.")
+    st.caption(f"Last updated: {datetime.now(ZoneInfo('Australia/Brisbane')).strftime('%H:%M:%S')}. Data refreshes automatically every minute.")
 
 else:
     st.info("Waiting for data... (Only today's data is shown)")

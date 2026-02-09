@@ -9,6 +9,10 @@ import aiohttp
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
 from datetime import datetime
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -270,7 +274,8 @@ class SEMSClient:
         Args:
             station_id: The power station ID (required). Get this from the SEMS portal URL.
         """
-        data = InverterData(timestamp=datetime.now())
+        tz = ZoneInfo("Australia/Brisbane")
+        data = InverterData(timestamp=datetime.now(tz))
         
         if not station_id:
             data.error_message = "Station ID is required. Please set SEMS_STATION_ID in config.py"
@@ -566,7 +571,8 @@ def get_inverter_data(account: str, password: str, station_id: str) -> InverterD
         station_id: Power station ID (required)
     """
     if not station_id:
-        data = InverterData(timestamp=datetime.now())
+        tz = ZoneInfo("Australia/Brisbane")
+        data = InverterData(timestamp=datetime.now(tz))
         data.error_message = "Station ID is required. Please set SEMS_STATION_ID in config.py"
         return data
     
