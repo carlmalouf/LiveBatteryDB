@@ -10,7 +10,7 @@ except ImportError:
     from backports.zoneinfo import ZoneInfo
 
 from energy_common import (
-    TIMEZONE, BATTERY_CAPACITY_KWH,
+    TIMEZONE, BATTERY_CAPACITY_KWH, BATTERY_MIN_SOC,
     get_setting as _base_get_setting,
     fetch_sems_data,
     process_chart_data,
@@ -192,7 +192,7 @@ if df is not None and not df.empty:
     
     with c2:
         st.markdown("### 🔋 Battery")
-        stored_kwh = (current_soc / 100.0) * BATTERY_CAPACITY_KWH
+        stored_kwh = max(0.0, (current_soc - BATTERY_MIN_SOC) / (100.0 - BATTERY_MIN_SOC)) * BATTERY_CAPACITY_KWH
         st.metric("SOC", f"{current_soc}% ({stored_kwh:.1f} kWh)")
         st.metric("Battery Benefit", f"${batt_benefit:.2f}", 
                 help=f"Savings (Avoided Grid Cost): ${df['battery_discharge_benefit'].sum():.2f}\nCharge Cost (Solar Export Foregone): -${df['battery_charge_cost'].sum():.2f}")

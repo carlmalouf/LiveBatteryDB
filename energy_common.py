@@ -34,7 +34,8 @@ USAGE_TARIFF = 26.18   # Cost to buy from grid
 FEEDIN_TARIFF = 5.0    # Credit for selling to grid
 
 # Battery
-BATTERY_CAPACITY_KWH = 44.8
+BATTERY_CAPACITY_KWH = 44.8   # Useable capacity (100% → 10% SOC)
+BATTERY_MIN_SOC = 10            # Minimum SOC the BMS allows (%)
 
 # ---------------------------------------------------------------------------
 # Configuration

@@ -32,7 +32,7 @@ except ImportError:
 from PIL import Image, ImageDraw, ImageFont
 
 from energy_common import (
-    TIMEZONE, USAGE_TARIFF, FEEDIN_TARIFF, BATTERY_CAPACITY_KWH,
+    TIMEZONE, USAGE_TARIFF, FEEDIN_TARIFF, BATTERY_CAPACITY_KWH, BATTERY_MIN_SOC,
     fetch_sems_data,
     process_chart_data,
 )
@@ -224,7 +224,7 @@ def render_dashboard(realtime, df, now) -> Image.Image:
         solar_grid_kwh = df["grid_export_kwh"].sum()
 
         current_soc    = realtime.battery_soc if (realtime and not realtime.error_message) else df["soc"].iloc[-1]
-        stored_kwh     = (current_soc / 100.0) * BATTERY_CAPACITY_KWH
+        stored_kwh     = max(0.0, (current_soc - BATTERY_MIN_SOC) / (100.0 - BATTERY_MIN_SOC)) * BATTERY_CAPACITY_KWH
         batt_discharge = df["battery_discharge_kwh"].sum()
         batt_charge    = df["battery_charge_kwh"].sum()
         batt_benefit   = df["battery_net_benefit"].sum()
