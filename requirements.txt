@@ -1,4 +1,10 @@
-streamlit
-pandas
-plotly
+# Shared
 aiohttp
+pandas
+
+# simple_dashboard.py
+streamlit
+plotly
+
+# eink_dashboard.py
+Pillow

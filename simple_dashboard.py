@@ -1,54 +1,33 @@
 import streamlit as st
-import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import asyncio
-from datetime import datetime, date
+from datetime import datetime
 import time
-import os
+
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
-    # Backwards compatibility for Python < 3.9
     from backports.zoneinfo import ZoneInfo
 
-# Import our existing client
-from sems_client import SEMSClient
-
-# Try to import config for local development, but don't fail if it's missing (e.g. on server)
-try:
-    import config
-except ImportError:
-    config = None
+from energy_common import (
+    TIMEZONE, BATTERY_CAPACITY_KWH, BATTERY_MIN_SOC,
+    get_setting as _base_get_setting,
+    fetch_sems_data,
+    process_chart_data,
+)
 
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
 
 def get_setting(key, default=None):
-    """
-    Retrieve a configuration setting with the following priority:
-    1. Streamlit Secrets (st.secrets) - for deployment
-    2. Environment Variables - for Docker/System setup
-    3. config.py - for local development
-    4. Default value
-    """
-    # 1. Streamlit Secrets
+    """Extend common get_setting with Streamlit Secrets support."""
     try:
         if hasattr(st, "secrets") and key in st.secrets:
             return st.secrets[key]
     except Exception:
-        pass # Ignore errors accessing secrets if not configured
-        
-    # 2. Environment Variables
-    if key in os.environ:
-        return os.environ[key]
-        
-    # 3. Local Config module
-    if config and hasattr(config, key):
-        return getattr(config, key)
-        
-    return default
+        pass
+    return _base_get_setting(key, default)
 
 # Page Config
 st.set_page_config(
@@ -58,10 +37,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Hardcoded Tariffs (c/kWh)
-USAGE_TARIFF = 26.18  # Cost to buy from grid
-FEEDIN_TARIFF = 5.0   # Credit for selling to grid
-
 # -----------------------------------------------------------------------------
 # Data Fetching
 # -----------------------------------------------------------------------------
@@ -69,111 +44,17 @@ FEEDIN_TARIFF = 5.0   # Credit for selling to grid
 @st.cache_resource(ttl=55)
 def get_sems_data():
     """Fetch today's chart data and realtime status from SEMS."""
-    async def fetch():
-        # Retrieve credentials from secrets/env/config
-        sems_account = get_setting("SEMS_ACCOUNT")
-        sems_password = get_setting("SEMS_PASSWORD")
-        station_id = get_setting("SEMS_STATION_ID")
-
-        if not sems_account or not sems_password or not station_id:
-            st.error("Missing Configuration: Please set SEMS_ACCOUNT, SEMS_PASSWORD, and SEMS_STATION_ID in .streamlit/secrets.toml or config.py")
-            return None, None
-
-        # Create client using config (now supports env vars)
-        client = SEMSClient(sems_account, sems_password)
-        
-        # Use Brisbane time for "today"
-        today = datetime.now(ZoneInfo("Australia/Brisbane")).strftime("%Y-%m-%d")
-        
-        # Fetch live instantaneous data and today's chart history
-        realtime_data = await client.fetch_data(station_id)
-        chart_data = await client.fetch_chart_data(station_id, today)
-        return realtime_data, chart_data
-
-    # Run async function
-    return asyncio.run(fetch())
-
-def process_chart_data(chart_json):
-    """Process raw API chart data into a DataFrame with calculated metrics."""
-    if not chart_json or chart_json.get("error"):
-        return None
-    
-    # 1. Convert lists to DataFrame
-    data_frames = []
-    # API Return Keys: pv_power, battery_power, meter_power, load_power, soc (all lists of tuples: time, value)
-    headers = ["pv_power", "battery_power", "meter_power", "load_power", "soc"]
-    
-    for key in headers:
-        if key in chart_json and chart_json[key]:
-            # Convert list of tuples to DataFrame
-            df_temp = pd.DataFrame(chart_json[key], columns=["timestamp", key])
-            df_temp["timestamp"] = pd.to_datetime(df_temp["timestamp"])
-            df_temp = df_temp.set_index("timestamp")
-            data_frames.append(df_temp)
-            
-    if not data_frames:
-        return pd.DataFrame()
-        
-    # Merge all series on timestamp
-    df = pd.concat(data_frames, axis=1).sort_index().fillna(0)
-    
-    # 2. Convert raw Watts to kW suitable for display
-    for col in ["pv_power", "battery_power", "meter_power", "load_power"]:
-        if col in df.columns:
-            df[f"{col}_kw"] = df[col] / 1000.0
-    
-    # 3. Calculate Energies (kWh) per interval
-    # Calculate time difference between points in hours (usually ~5 mins = 0.0833 hrs)
-    df["dt_hours"] = df.index.to_series().diff().dt.total_seconds() / 3600.0
-    # Fill first NaN with estimated 5 mins (standard SEMS interval)
-    df["dt_hours"] = df["dt_hours"].fillna(5.0/60.0) 
-    
-    # Energy (kWh) = Power (W) / 1000 * time (h)
-    df["pv_energy_kwh"] = df["pv_power"] / 1000.0 * df["dt_hours"]
-    df["load_energy_kwh"] = df["load_power"] / 1000.0 * df["dt_hours"]
-    
-    # Battery Energy
-    # Chart Data Convention: Positive = Discharge, Negative = Charge
-    df["battery_discharge_kwh"] = df["battery_power"].clip(lower=0) / 1000.0 * df["dt_hours"]
-    df["battery_charge_kwh"] = (-df["battery_power"]).clip(lower=0) / 1000.0 * df["dt_hours"]
-
-    # Grid Energy
-    # Chart Data Convention: Negative = Import, Positive = Export (Matches dashboard.py observations)
-    df["grid_import_kwh"] = (-df["meter_power"]).clip(lower=0) / 1000.0 * df["dt_hours"]
-    df["grid_export_kwh"] = df["meter_power"].clip(lower=0) / 1000.0 * df["dt_hours"]
-
-    # 4. Calculate Financial Benefits
-    
-    # Solar Self-Consumption: Min of what we generated vs what we used
-    df["solar_to_load_kwh"] = df[["pv_energy_kwh", "load_energy_kwh"]].min(axis=1)
-    
-    # Solar Benefit ($): Money saved by not buying grid power for self-consumed solar
-    df["solar_benefit"] = df["solar_to_load_kwh"] * USAGE_TARIFF / 100.0
-    
-    # Battery Savings ($): Money saved by discharging battery instead of buying grid power
-    df["battery_discharge_benefit"] = df["battery_discharge_kwh"] * USAGE_TARIFF / 100.0
-    
-    # Battery Cost ($): Money lost by charging (opportunity cost of not exporting)
-    # Using Feed-in Tariff as the cost basis
-    df["battery_charge_cost"] = df["battery_charge_kwh"] * FEEDIN_TARIFF / 100.0
-    
-    # Net Battery Benefit ($)
-    df["battery_net_benefit"] = df["battery_discharge_benefit"] - df["battery_charge_cost"]
-
-    # Export Income ($): Money earned from selling to grid
-    df["export_income"] = df["grid_export_kwh"] * FEEDIN_TARIFF / 100.0
-    
-    # Grid Cost ($): Money spent on imports
-    df["grid_cost"] = df["grid_import_kwh"] * USAGE_TARIFF / 100.0
-    
-    return df
+    if not get_setting("SEMS_ACCOUNT") or not get_setting("SEMS_PASSWORD") or not get_setting("SEMS_STATION_ID"):
+        st.error("Missing Configuration: Please set SEMS_ACCOUNT, SEMS_PASSWORD, and SEMS_STATION_ID in .streamlit/secrets.toml or config.py")
+        return None, None
+    return asyncio.run(fetch_sems_data(get_setting_fn=get_setting))
 
 # -----------------------------------------------------------------------------
 # Main Application
 # -----------------------------------------------------------------------------
 
 # Title with Date
-st.title(f"🌞 Live Energy Dashboard - {datetime.now(ZoneInfo('Australia/Brisbane')).strftime('%A %d %B')}")
+st.title(f"🌞 Live Energy Dashboard - {datetime.now(ZoneInfo(TIMEZONE)).strftime('%A %d %B')}")
 
 # Fetch Data
 realtime, chart_json = get_sems_data()
@@ -311,7 +192,7 @@ if df is not None and not df.empty:
     
     with c2:
         st.markdown("### 🔋 Battery")
-        stored_kwh = (current_soc / 100.0) * 44.8
+        stored_kwh = max(0.0, (current_soc - BATTERY_MIN_SOC) / (100.0 - BATTERY_MIN_SOC)) * BATTERY_CAPACITY_KWH
         st.metric("SOC", f"{current_soc}% ({stored_kwh:.1f} kWh)")
         st.metric("Battery Benefit", f"${batt_benefit:.2f}", 
                 help=f"Savings (Avoided Grid Cost): ${df['battery_discharge_benefit'].sum():.2f}\nCharge Cost (Solar Export Foregone): -${df['battery_charge_cost'].sum():.2f}")
@@ -388,7 +269,7 @@ if df is not None and not df.empty:
     
     st.plotly_chart(fig, use_container_width=True)
     
-    st.caption(f"Last updated: {datetime.now(ZoneInfo('Australia/Brisbane')).strftime('%H:%M:%S')}. Data refreshes automatically every minute.")
+    st.caption(f"Last updated: {datetime.now(ZoneInfo(TIMEZONE)).strftime('%H:%M:%S')}. Data refreshes automatically every minute.")
 
 else:
     st.info("Waiting for data... (Only today's data is shown)")

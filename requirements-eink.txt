@@ -1,0 +1,4 @@
+# Requirements for the e-Ink display (Raspberry Pi)
+aiohttp
+pandas
+Pillow
