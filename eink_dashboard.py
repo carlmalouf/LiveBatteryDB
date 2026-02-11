@@ -21,7 +21,6 @@ import asyncio
 import argparse
 import logging
 import os
-import sys
 import time
 from datetime import datetime
 
@@ -32,13 +31,11 @@ except ImportError:
 
 from PIL import Image, ImageDraw, ImageFont
 
-# Import our existing client & config helpers
-from sems_client import SEMSClient
-
-try:
-    import config
-except ImportError:
-    config = None
+from energy_common import (
+    TIMEZONE, USAGE_TARIFF, FEEDIN_TARIFF, BATTERY_CAPACITY_KWH,
+    fetch_sems_data,
+    process_chart_data,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -64,27 +61,8 @@ RED     = (255, 0, 0)
 YELLOW  = (255, 255, 0)
 ORANGE  = (255, 128, 0)
 
-# Tariffs (must match simple_dashboard.py)
-USAGE_TARIFF = 26.18   # c/kWh buy from grid
-FEEDIN_TARIFF = 5.0    # c/kWh sell to grid
-
 # Refresh interval in seconds (5 minutes — well above the 180 s minimum)
 REFRESH_INTERVAL = 300
-
-# Battery capacity for kWh estimate from SOC%
-BATTERY_CAPACITY_KWH = 44.8
-
-# ---------------------------------------------------------------------------
-# Configuration (mirrors simple_dashboard.py)
-# ---------------------------------------------------------------------------
-
-def get_setting(key, default=None):
-    """Retrieve config from env vars or config.py."""
-    if key in os.environ:
-        return os.environ[key]
-    if config and hasattr(config, key):
-        return getattr(config, key)
-    return default
 
 # ---------------------------------------------------------------------------
 # Font helpers — tries system fonts, falls back to PIL default
@@ -132,82 +110,6 @@ FONT_SM      = _load_font(14)
 FONT_XS      = _load_font(12)
 
 # ---------------------------------------------------------------------------
-# Data Fetching  (async, matching simple_dashboard.py logic)
-# ---------------------------------------------------------------------------
-
-async def fetch_sems_data():
-    """Fetch realtime + chart data from SEMS portal."""
-    account = get_setting("SEMS_ACCOUNT")
-    password = get_setting("SEMS_PASSWORD")
-    station_id = get_setting("SEMS_STATION_ID")
-
-    if not account or not password or not station_id:
-        logger.error("Missing SEMS credentials. Set SEMS_ACCOUNT, SEMS_PASSWORD, SEMS_STATION_ID.")
-        return None, None
-
-    client = SEMSClient(account, password)
-    today = datetime.now(ZoneInfo("Australia/Brisbane")).strftime("%Y-%m-%d")
-
-    try:
-        realtime = await client.fetch_data(station_id)
-        chart = await client.fetch_chart_data(station_id, today)
-        return realtime, chart
-    except Exception as e:
-        logger.exception("SEMS fetch failed: %s", e)
-        return None, None
-    finally:
-        await client.close()
-
-# ---------------------------------------------------------------------------
-# Chart Data Processing (identical maths to simple_dashboard.py)
-# ---------------------------------------------------------------------------
-
-def process_chart_data(chart_json):
-    """Process raw API chart data into aggregate daily metrics."""
-    import pandas as pd
-
-    if not chart_json or chart_json.get("error"):
-        return None
-
-    data_frames = []
-    for key in ["pv_power", "battery_power", "meter_power", "load_power", "soc"]:
-        if key in chart_json and chart_json[key]:
-            df_temp = pd.DataFrame(chart_json[key], columns=["timestamp", key])
-            df_temp["timestamp"] = pd.to_datetime(df_temp["timestamp"])
-            df_temp = df_temp.set_index("timestamp")
-            data_frames.append(df_temp)
-
-    if not data_frames:
-        return None
-
-    df = pd.concat(data_frames, axis=1).sort_index().fillna(0)
-
-    # Time deltas
-    df["dt_hours"] = df.index.to_series().diff().dt.total_seconds() / 3600.0
-    df["dt_hours"] = df["dt_hours"].fillna(5.0 / 60.0)
-
-    # Energies
-    df["pv_energy_kwh"]  = df["pv_power"] / 1000.0 * df["dt_hours"]
-    df["load_energy_kwh"] = df["load_power"] / 1000.0 * df["dt_hours"]
-
-    df["battery_discharge_kwh"] = df["battery_power"].clip(lower=0) / 1000.0 * df["dt_hours"]
-    df["battery_charge_kwh"]    = (-df["battery_power"]).clip(lower=0) / 1000.0 * df["dt_hours"]
-
-    df["grid_import_kwh"] = (-df["meter_power"]).clip(lower=0) / 1000.0 * df["dt_hours"]
-    df["grid_export_kwh"] = df["meter_power"].clip(lower=0) / 1000.0 * df["dt_hours"]
-
-    # Financials
-    df["solar_to_load_kwh"]       = df[["pv_energy_kwh", "load_energy_kwh"]].min(axis=1)
-    df["solar_benefit"]           = df["solar_to_load_kwh"] * USAGE_TARIFF / 100.0
-    df["battery_discharge_benefit"] = df["battery_discharge_kwh"] * USAGE_TARIFF / 100.0
-    df["battery_charge_cost"]     = df["battery_charge_kwh"] * FEEDIN_TARIFF / 100.0
-    df["battery_net_benefit"]     = df["battery_discharge_benefit"] - df["battery_charge_cost"]
-    df["export_income"]           = df["grid_export_kwh"] * FEEDIN_TARIFF / 100.0
-    df["grid_cost"]               = df["grid_import_kwh"] * USAGE_TARIFF / 100.0
-
-    return df
-
-# ---------------------------------------------------------------------------
 # Image Rendering
 # ---------------------------------------------------------------------------
 
@@ -216,32 +118,34 @@ def render_dashboard(realtime, df, now) -> Image.Image:
     img = Image.new("RGB", (EPD_WIDTH, EPD_HEIGHT), WHITE)
     draw = ImageDraw.Draw(img)
 
-    # ----- Layout geometry -----
-    HEADER_H     = 48
+    # ----- Layout geometry (must total EPD_HEIGHT = 480) -----
+    HEADER_H     = 44
     LIVE_TOP     = HEADER_H
-    LIVE_H       = 150
-    DIVIDER1_Y   = LIVE_TOP + LIVE_H
-    SECTION_H    = 28
-    TOTALS_TOP   = DIVIDER1_Y + SECTION_H
+    LIVE_H       = 120
+    DIVIDER1_Y   = LIVE_TOP + LIVE_H       # 164
+    SECTION_H    = 24
+    TOTALS_TOP   = DIVIDER1_Y + SECTION_H  # 188
     TOTALS_H     = 210
-    FOOTER_TOP   = EPD_HEIGHT - 44
-    COL_W        = EPD_WIDTH // 4   # 200px per column
+    FOOTER_H     = 44
+    FOOTER_TOP   = EPD_HEIGHT - FOOTER_H   # 436
+    # 44 + 120 + 24 + 210 + 38 (power bar) + 44 = 480
+    COL_W        = EPD_WIDTH // 4           # 200 px per column
 
     # ================================================================
     #  HEADER BAR
     # ================================================================
     draw.rectangle([0, 0, EPD_WIDTH, HEADER_H], fill=BLACK)
-    draw.text((12, 6), "SOLAR DASHBOARD", font=FONT_LG_BOLD, fill=ORANGE)
+    draw.text((12, 5), "SOLAR DASHBOARD", font=FONT_LG_BOLD, fill=ORANGE)
 
     date_str = now.strftime("%A %d %B")
     time_str = f"Updated {now.strftime('%H:%M')}"
     # Right-align time
     time_bbox = draw.textbbox((0, 0), time_str, font=FONT_MD)
-    draw.text((EPD_WIDTH - (time_bbox[2] - time_bbox[0]) - 12, 12), time_str, font=FONT_MD, fill=WHITE)
+    draw.text((EPD_WIDTH - (time_bbox[2] - time_bbox[0]) - 12, 11), time_str, font=FONT_MD, fill=WHITE)
     # Centre date
     date_bbox = draw.textbbox((0, 0), date_str, font=FONT_MD)
     date_w = date_bbox[2] - date_bbox[0]
-    draw.text(((EPD_WIDTH - date_w) // 2, 12), date_str, font=FONT_MD, fill=YELLOW)
+    draw.text(((EPD_WIDTH - date_w) // 2, 11), date_str, font=FONT_MD, fill=YELLOW)
 
     # ================================================================
     #  LIVE SNAPSHOT  (4 columns)
@@ -306,7 +210,7 @@ def render_dashboard(realtime, df, now) -> Image.Image:
     #  SECTION DIVIDER — "TODAY'S TOTALS"
     # ================================================================
     draw.rectangle([0, DIVIDER1_Y, EPD_WIDTH, DIVIDER1_Y + SECTION_H], fill=BLACK)
-    draw.text((12, DIVIDER1_Y + 4), "TODAY'S TOTALS", font=FONT_MD_BOLD, fill=YELLOW)
+    draw.text((12, DIVIDER1_Y + 3), "TODAY'S TOTALS", font=FONT_MD_BOLD, fill=YELLOW)
 
     # ================================================================
     #  DAILY TOTALS  (4 columns)
@@ -402,7 +306,7 @@ def render_dashboard(realtime, df, now) -> Image.Image:
         f"Refreshes every {REFRESH_INTERVAL // 60} mins    |    "
         f"Tariffs: {USAGE_TARIFF}c / {FEEDIN_TARIFF}c feed-in"
     )
-    draw.text((12, FOOTER_TOP + 10), footer_text, font=FONT_SM, fill=WHITE)
+    draw.text((12, FOOTER_TOP + 14), footer_text, font=FONT_SM, fill=WHITE)
 
     # ================================================================
     #  MINI POWER-FLOW BAR  (between totals and footer)
@@ -516,7 +420,7 @@ def main():
 
     while True:
         try:
-            now = datetime.now(ZoneInfo("Australia/Brisbane"))
+            now = datetime.now(ZoneInfo(TIMEZONE))
             logger.info("Fetching SEMS data at %s …", now.strftime("%H:%M:%S"))
 
             realtime, chart_json = asyncio.run(fetch_sems_data())
