@@ -1,5 +1,0 @@
-# Requirements for the Streamlit web dashboard
-aiohttp
-pandas
-streamlit
-plotly
